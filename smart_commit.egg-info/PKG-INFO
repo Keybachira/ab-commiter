@@ -1,0 +1,97 @@
+Metadata-Version: 2.4
+Name: smart-commit
+Version: 0.1.0
+Summary: Analisa o que está em stage, gera a mensagem de commit e sobe tudo num comando
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# smart-commit
+
+Analisa o que está em stage, avisa se algo perigoso vai subir, gera a mensagem de commit (Conventional Commits) e faz commit + push num só fluxo.
+
+## Instalar (fica no PATH)
+
+```bash
+cd smart-commit
+uv tool install --editable .
+```
+
+Fica disponível em qualquer pasta como `smart-commit`. O `--editable` faz com que as alterações que fizeres ao `smart_commit.py` apliquem logo, sem reinstalar.
+
+Se o comando não for encontrado, corre `uv tool update-shell` e abre um terminal novo.
+
+Atalho opcional para escreveres `git ship`:
+
+```bash
+git config --global alias.ship "!smart-commit"
+```
+
+## Usar
+
+```bash
+smart-commit            # fluxo normal: analisa, mostra a mensagem, Enter para commit + push
+smart-commit -a         # faz git add -A sem perguntar
+smart-commit -a -y      # modo turbo: add, commit e push sem perguntar nada
+smart-commit -n         # só commit, sem push
+smart-commit --dry      # só mostra a análise e a mensagem
+smart-commit -m "feat: x"   # usa a tua mensagem (mantém análise e push)
+```
+
+Quando mostra a mensagem: **Enter** aceita, **e** abre o editor com a mensagem já preenchida, **r** gera outra (só com IA), **n** cancela.
+
+## .gitignore automático
+
+Corre sempre **antes** do `git add -A`, por isso o `node_modules` nunca chega a entrar no stage.
+
+- **Sem `.gitignore`**: cria um, com base no que detecta (`package.json` → Node, `pyproject.toml`/`requirements.txt` → Python, `Cargo.toml` → Rust), mais `.env`, `.DS_Store`, `*.log`.
+- **Com `.gitignore`**: não mexe no que já escreveste. Só acrescenta (num bloco `# adicionado pelo smart-commit`) o que realmente aparece no repo sem estar ignorado: `node_modules`, `.next`, `.env`, `__pycache__`, `.venv`, logs, chaves `.pem`/`.key`...
+- **Já em stage por engano** (ex.: fizeste `git add .` antes): tira do stage, mas o ficheiro continua no disco.
+- **Já commitado antes**: pergunta se queres remover do repositório (continua no disco). Com `-y` não faz isto sozinho, só avisa e mostra o comando.
+- `dist/`, `build/` e `coverage/` só vão para o `.gitignore` se ainda não estiverem no repo, porque há projectos que os commitam de propósito. Nunca são removidos do que já foi commitado.
+- O `.env.example` fica sempre de fora da regra, para poder subir.
+- Se o `.env` já tinha sido commitado, avisa para trocares as chaves, porque ficou no histórico.
+
+Para desligar: `smart-commit --sem-gitignore`.
+
+## O que verifica antes de commitar
+
+**Bloqueia** (precisas de `--forcar` para continuar):
+- ficheiros `.env`, `.pem`, `.key`, `id_rsa` em stage
+- chaves AWS, Anthropic (`sk-ant-`), tokens GitHub, chaves privadas
+- `password = "..."`, `api_key: "..."` e semelhantes no código
+- marcadores de conflito (`<<<<<<<`)
+
+**Avisa** (não bloqueia):
+- `node_modules`, `dist`, `build`, `.next` em stage
+- ficheiros com mais de 5 MB
+- `console.log` / `debugger` adicionados
+- alterações em muitas áreas (sugere dividir em commits)
+- estares directamente na `main`/`master`
+
+## Mensagem: IA ou heurística
+
+**Com IA** (recomendado): define a variável `ANTHROPIC_API_KEY` e a mensagem é escrita a partir do diff, a seguir o estilo dos teus últimos commits. Usa o modelo `claude-haiku-5-5`, que é rápido e barato. Muda com `SMART_COMMIT_MODEL`.
+
+```powershell
+setx ANTHROPIC_API_KEY "sk-ant-..."     # Windows (abre terminal novo)
+```
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # Linux/macOS (põe no ~/.bashrc ou ~/.zshrc)
+```
+
+A chave de API é da consola de desenvolvedor da Anthropic e tem facturação própria, separada da conta do claude.ai.
+
+Privacidade: o diff é enviado à API. Lockfiles, `.env`, `.pem` e `.key` são excluídos, o diff é cortado a 12 000 caracteres, e se houver um bloqueio com `--forcar` a IA fica desligada.
+
+**Sem IA** (sem chave, sem rede, ou `--sem-ia`): a heurística deduz o tipo (feat, fix, docs, test, build, style...) pelos ficheiros e pelo nome do ramo (`fix/login` → `fix`), o escopo pela pasta, e lista os ficheiros alterados. É menos precisa, por isso edita com `e` quando for preciso.
+
+## Push
+
+- Se o ramo já tem upstream: `git push`
+- Se não tem: `git push -u origin HEAD`
+- Se for rejeitado, oferece `git pull --rebase` e tenta de novo
+- Sem remote ou com HEAD solto: fica só o commit local
+
+## Língua
+
+Por padrão a descrição sai em português. Usa `--en` para inglês, ou define `SMART_COMMIT_LANG=en`. O tipo (`feat`, `fix`...) fica sempre em inglês.

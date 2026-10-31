@@ -1,0 +1,17 @@
+[project]
+name = "smart-commit"
+version = "0.1.0"
+description = "Analisa o que está em stage, gera a mensagem de commit e sobe tudo num comando"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+smart-commit = "smart_commit:_entrada"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["smart_commit"]

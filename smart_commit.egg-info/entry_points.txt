@@ -1,0 +1,2 @@
+[console_scripts]
+smart-commit = smart_commit:_entrada
