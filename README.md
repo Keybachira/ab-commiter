@@ -87,4 +87,4 @@ Privacidade: o diff é enviado à API. Lockfiles, `.env`, `.pem` e `.key` são e
 
 ## Língua
 
-Por padrão a descrição sai em português. Usa `--en` para inglês, ou define `SMART_COMMIT_LANG=en`. O tipo (`feat`, `fix`...) fica sempre em inglês.
+Por padrão a descrição sai em português. Use `--en` para inglês, ou define `SMART_COMMIT_LANG=en`. O tipo (`feat`, `fix`...) fica sempre em inglês.
