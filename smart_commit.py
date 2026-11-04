@@ -6,6 +6,9 @@ Fluxo rápido:  smart-commit   ->  (stage) -> análise -> mensagem -> Enter -> c
 Com ANTHROPIC_API_KEY definida, a mensagem é escrita por IA a partir do diff.
 Sem chave (ou sem rede), usa uma heurística local, que funciona offline.
 
+Com -p/--partes, divide as alterações em partes (área, testes, docs, build)
+e faz um commit por parte.
+
 Só usa a biblioteca padrão.
 """
 import argparse
@@ -92,7 +95,9 @@ def saida(*args):
 
 
 def ficheiros_staged():
-    r = git("diff", "--cached", "--name-status")
+    # --no-renames: uma renomeação aparece como D (antigo) + A (novo), assim os
+    # dois ficheiros entram sempre juntos na mesma parte.
+    r = git("diff", "--cached", "--no-renames", "--name-status")
     res = []
     for linha in r.stdout.splitlines():
         partes = linha.split("\t")
@@ -166,7 +171,7 @@ def analisar(ficheiros, adicionadas, topo, ramo):
 
     areas = {a for a in (_area(p) for _, p in ficheiros) if a}
     if len(ficheiros) >= 8 and len(areas) >= 3:
-        avisos.append(f"mudanças em {len(areas)} áreas ({', '.join(sorted(areas)[:4])}...) — talvez valha dividir em commits separados")
+        avisos.append(f"mudanças em {len(areas)} áreas ({', '.join(sorted(areas)[:4])}...) — talvez valha dividir em commits separados (usa -p)")
 
     if ramo in ("main", "master"):
         avisos.append(f"estás directamente na {ramo}")
@@ -267,8 +272,10 @@ def mensagem_heuristica(ficheiros, ramo, adicionadas, lang):
 # ---------- mensagem (IA) ----------
 
 
-def mensagem_ia(chave, modelo, lang, ramo, stat, diff, recentes):
+def mensagem_ia(chave, modelo, lang, ramo, stat, diff, recentes, parte=None):
     idioma = "português europeu (Portugal/Angola, nunca brasileiro)" if lang == "pt" else "English"
+    nota_parte = (f"\nEsta alteração é só a parte '{parte}' de uma mudança maior, "
+                  f"dividida em vários commits. Descreve apenas esta parte.\n") if parte else ""
     prompt = f"""Escreve a mensagem de commit para esta alteração.
 
 Regras:
@@ -279,7 +286,7 @@ Regras:
 - Não inventes nada que não esteja no diff.
 - Responde APENAS com a mensagem, sem aspas nem blocos de código.
 
-Ramo: {ramo}
+Ramo: {ramo}{nota_parte}
 Commits recentes (para seguires o estilo):
 {recentes or '(nenhum)'}
 
@@ -507,6 +514,118 @@ def mostrar_resumo(ficheiros, ramo):
         print(cinza(f"  ... e mais {len(ficheiros) - 12}"))
 
 
+# ---------- commits por partes ----------
+
+
+def grupo_do_ficheiro(p):
+    if Path(p).name in NOMES_BUILD:
+        return "build"
+    if Path(p).suffix in EXT_DOC:
+        return "docs"
+    if re.search(r"(^|/)(tests?|__tests__)/|\.(test|spec)\.", p):
+        return "testes"
+    return _area(p) or "raiz"
+
+
+def agrupar(ficheiros):
+    """Divide os ficheiros em partes: uma por área, mais testes, docs e build (no fim)."""
+    grupos = {}
+    for s, p in ficheiros:
+        grupos.setdefault(grupo_do_ficheiro(p), []).append((s, p))
+    fim = ["testes", "docs", "build"]
+    nomes = sorted(g for g in grupos if g not in fim) + [g for g in fim if g in grupos]
+    return [(n, grupos[n]) for n in nomes]
+
+
+def adicionar(paths):
+    for i in range(0, len(paths), 40):
+        git("add", "-A", "--", *paths[i:i + 40])
+
+
+def gerar_mensagem(usar_ia, chave, modelo, lang, ramo, ficheiros, adicionadas, parte=None):
+    if usar_ia and chave:
+        try:
+            stat = saida("diff", "--cached", "--stat")
+            recentes = saida("log", "-5", "--pretty=%s") if git("rev-parse", "HEAD").returncode == 0 else ""
+            return mensagem_ia(chave, modelo, lang, ramo, stat, diff_para_ia(), recentes, parte), "IA"
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
+            print(amarelo(f"IA indisponível ({type(e).__name__}); a usar heurística local."))
+    return mensagem_heuristica(ficheiros, ramo, adicionadas, lang), "heurística"
+
+
+def mostrar_plano(grupos):
+    print(negrito(f"Divisão em {len(grupos)} commits:"))
+    for i, (nome, fs) in enumerate(grupos, 1):
+        print(f"  {i}. {nome} {cinza(f'({len(fs)} ficheiro(s))')}")
+    print()
+
+
+def commit_por_partes(args, ramo, lang, usar_ia, grupos):
+    """Faz um commit por parte. Devolve quantos commits foram feitos."""
+    mostrar_plano(grupos)
+    if not args.sim and not confirmar("Continuar?", True):
+        print("Cancelado.")
+        return 0
+    chave = os.environ.get("ANTHROPIC_API_KEY")
+    modelo = os.environ.get("SMART_COMMIT_MODEL", MODELO_PADRAO)
+    git("reset", "-q")          # tira tudo do stage; os ficheiros continuam no disco
+    feitos = 0
+    for i, (nome, fs) in enumerate(grupos, 1):
+        adicionar([p for _, p in fs])
+        staged = ficheiros_staged()
+        if not staged:
+            continue
+        print(negrito(f"[{i}/{len(grupos)}] {nome}"))
+        mostrar_resumo(staged, ramo)
+        adic = linhas_adicionadas()
+        msg, origem = gerar_mensagem(usar_ia, chave, modelo, lang, ramo, staged, adic, nome)
+
+        def mostrar(m, o):
+            print(f"{negrito('Mensagem')} {cinza('(' + o + ')')}")
+            for l in m.splitlines():
+                print(f"  {l}")
+            print()
+        mostrar(msg, origem)
+
+        editar, saltar, parar = False, False, False
+        while not args.sim:
+            r = input("[Enter] commit  |  e editar  |  r regenerar  |  s saltar  |  n parar > ").strip().lower()
+            if r == "":
+                break
+            if r == "e":
+                editar = True
+                break
+            if r == "s":
+                saltar = True
+                break
+            if r in ("n", "q"):
+                parar = True
+                break
+            if r == "r":
+                if origem == "IA":
+                    msg, origem = gerar_mensagem(usar_ia, chave, modelo, lang, ramo, staged, adic, nome)
+                    mostrar(msg, origem)
+                else:
+                    print("Sem IA não há alternativa; usa 'e' para editar.")
+
+        if parar:
+            git("reset", "-q")
+            print(amarelo("Parei aqui. O resto ficou por commitar (continua no disco)."))
+            break
+        if saltar:
+            git("reset", "-q")
+            print(cinza("Parte saltada: continua por commitar.\n"))
+            continue
+        if not commitar(msg, editar):
+            print(vermelho("Commit falhou ou foi cancelado (hooks? editor fechado sem guardar?)."))
+            git("reset", "-q")
+            break
+        feitos += 1
+        print(verde(f"Commit {saida('rev-parse', '--short', 'HEAD')} criado.\n"))
+    git("reset", "-q")
+    return feitos
+
+
 def main():
     preparar_consola()
     ap = argparse.ArgumentParser(prog="smart-commit",
@@ -514,6 +633,8 @@ def main():
     ap.add_argument("-a", "--tudo", action="store_true", help="faz 'git add -A' sem perguntar")
     ap.add_argument("-y", "--sim", action="store_true", help="não pergunta nada: commit e push logo")
     ap.add_argument("-n", "--sem-push", action="store_true", help="só commit, sem push")
+    ap.add_argument("-p", "--partes", action="store_true",
+                    help="um commit por parte (área, testes, docs, build)")
     ap.add_argument("-m", "--mensagem", help="usa esta mensagem em vez de gerar uma")
     ap.add_argument("--sem-ia", action="store_true", help="usa só a heurística local")
     ap.add_argument("--sem-gitignore", action="store_true", help="não mexe no .gitignore")
@@ -575,6 +696,34 @@ def main():
         usar_ia = False
     print()
 
+    # ----- commits por partes -----
+    grupos = agrupar(ficheiros)
+    partes = args.partes
+    if partes and args.mensagem:
+        print(amarelo("--mensagem não combina com --partes: ignoro --partes."))
+        partes = False
+    if (not partes and not args.mensagem and not args.sim and not args.dry
+            and len(grupos) >= 3 and len(ficheiros) >= 8):
+        partes = confirmar(f"Mudanças em {len(grupos)} partes. Fazer um commit por parte?", False)
+    if partes and len(grupos) < 2:
+        print(cinza("Só há uma parte: commit normal.\n"))
+        partes = False
+    if partes and args.dry:
+        mostrar_plano(grupos)
+        return 0
+    if partes:
+        feitos = commit_por_partes(args, ramo, lang, usar_ia, grupos)
+        if not feitos:
+            return 1
+        if args.sem_push:
+            return 0
+        if subir(ramo):
+            print(verde("Enviado."))
+            return 0
+        print(vermelho("Push falhou. Os commits estão guardados localmente."))
+        return 1
+
+    # ----- commit único -----
     chave = os.environ.get("ANTHROPIC_API_KEY")
     modelo = os.environ.get("SMART_COMMIT_MODEL", MODELO_PADRAO)
     stat = saida("diff", "--cached", "--stat")
